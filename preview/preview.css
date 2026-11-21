@@ -1,0 +1,79 @@
+html,
+body {
+  margin: 0;
+  min-height: 100%;
+}
+
+.preview-body {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  box-sizing: border-box;
+  padding: 24px;
+  color: #40ff5e;
+  background-color: #030604;
+  background-position: 0 0;
+  font-family: sans-serif;
+}
+
+.preview-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.preview-label {
+  display: flex;
+  justify-content: space-between;
+  gap: 20px;
+  color: rgba(64, 255, 94, 0.48);
+  font-family: monospace;
+  font-size: 10px;
+  letter-spacing: 0.08em;
+}
+
+.preview-wrap .app-shell {
+  width: 360px;
+  height: 480px;
+  border: 1px solid rgba(64, 255, 94, 0.24);
+  border-radius: 6px;
+  box-shadow: 0 24px 80px rgba(64, 255, 94, 0.08);
+}
+
+.preview-help {
+  margin: 0;
+  color: rgba(64, 255, 94, 0.36);
+  font-family: monospace;
+  font-size: 10px;
+}
+
+.preview-wrap button {
+  cursor: pointer;
+}
+
+.preview-wrap button:disabled {
+  cursor: default;
+}
+
+.preview-wrap .app-shell [hidden] {
+  display: none !important;
+}
+
+.preview-wrap .action-button.primary {
+  color: #40ff5e;
+  background-color: rgba(64, 255, 94, 0.12);
+}
+
+.preview-wrap .app-shell .screen {
+  overflow: hidden;
+}
+
+.preview-wrap .app-shell .viewport {
+  overflow-y: auto;
+  scrollbar-width: none;
+}
+
+.preview-wrap .app-shell .viewport::-webkit-scrollbar {
+  width: 0;
+}
+

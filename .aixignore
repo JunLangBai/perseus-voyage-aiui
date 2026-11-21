@@ -1,0 +1,13 @@
+# Browser-only preview and development files.
+preview/
+tests/
+scripts/
+dist/
+docs/
+
+# Project documentation stays in source control but is not packaged.
+*.md
+!AGENTS.md
+
+# Temporary test modules can be left by editor or test runs.
+pages/index/.focus-test-*.mjs

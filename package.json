@@ -1,0 +1,12 @@
+{
+  "name": "perseus-voyage-aiui-demo",
+  "private": true,
+  "type": "module",
+  "version": "0.2.0",
+  "scripts": {
+    "check": "node scripts/validate-aiui.mjs",
+    "preview": "node scripts/serve-preview.mjs",
+    "test": "node --test tests/engine.test.js tests/temple.test.js tests/gaze.test.js tests/page-focus.test.js"
+  }
+}
+
