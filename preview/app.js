@@ -29,10 +29,10 @@ const elements = {
   telemetry: document.querySelector('#telemetry'),
   resources: document.querySelector('#resources'),
   viewport: document.querySelector('#viewport'),
+  dofNav: document.querySelector('#dof-nav'),
   control: document.querySelector('#control'),
   toast: document.querySelector('#toast'),
   app: document.querySelector('#app'),
-  spatialDepth: document.querySelector('#spatial-depth'),
 };
 
 class NamespacedStorage {
@@ -100,6 +100,7 @@ class DemoPreview {
     this.focusedIndex = -1;
     this.focusContext = '';
     this.spatialMode = new URLSearchParams(window.location.search).get('flat') !== '1';
+    this.spatialOrientationLabel = 'YAW +00° · PITCH +00°';
     this.singleTapTimer = null;
     this.singleTapToken = 0;
     this.templeInputState = {
@@ -133,6 +134,7 @@ class DemoPreview {
     elements.app.addEventListener('pointermove', (event) => this.updateSpatialFromPointer(event));
     elements.app.addEventListener('pointerleave', () => this.resetSpatialMotion());
     elements.viewport.addEventListener('pointermove', (event) => this.focusFromPointer(event));
+    document.addEventListener('keydown', (event) => this.handleSpatialPreviewKey(event));
     document.addEventListener('keydown', (event) => this.handlePreviewNod(event));
     document.addEventListener('keydown', (event) => this.handleTempleKey('down', event));
     document.addEventListener('keyup', (event) => this.handleTempleKey('up', event));
@@ -216,19 +218,20 @@ class DemoPreview {
 
   renderSpatialMode() {
     elements.app.classList.toggle('spatial-mode', this.spatialMode);
-    elements.spatialDepth.hidden = !this.spatialMode;
+    elements.dofNav.hidden = !this.spatialMode;
     if (!this.spatialMode) this.resetSpatialMotion();
   }
 
-  applySpatialMotion(motion) {
-    elements.app.style.setProperty('--spatial-back-x', `${motion.backX}px`);
-    elements.app.style.setProperty('--spatial-back-y', `${motion.backY}px`);
-    elements.app.style.setProperty('--spatial-back-rotate', `${motion.backRotate}deg`);
+  applySpatialMotion(motion, angles = { yaw: 0, pitch: 0 }) {
     elements.app.style.setProperty('--spatial-view-x', `${motion.viewX}px`);
     elements.app.style.setProperty('--spatial-view-y', `${motion.viewY}px`);
     elements.app.style.setProperty('--spatial-view-rotate', `${motion.viewRotate}deg`);
     elements.app.style.setProperty('--spatial-view-scale', String(motion.viewScale));
+    elements.app.style.setProperty('--spatial-nav-x', `${motion.navX}px`);
+    elements.app.style.setProperty('--spatial-nav-rotate', `${motion.navRotate}deg`);
     elements.app.style.setProperty('--spatial-control-x', `${motion.controlX}px`);
+    this.spatialOrientationLabel = `YAW ${formatSignedAngle(angles.yaw)} · PITCH ${formatSignedAngle(angles.pitch)}`;
+    if (this.spatialMode) this.renderDofNav();
   }
 
   updateSpatialFromPointer(event) {
@@ -239,11 +242,43 @@ class DemoPreview {
     const normalizedY = clamp(((event.clientY - bounds.top) / bounds.height) * 2 - 1, -1, 1);
     const yaw = normalizedX * ((GAZE_CONFIG.horizontalFieldOfViewDegrees * Math.PI) / 360);
     const pitch = -normalizedY * ((GAZE_CONFIG.verticalFieldOfViewDegrees * Math.PI) / 360);
-    this.applySpatialMotion(spatialMotionFromAngles(yaw, pitch));
+    this.applySpatialMotion(spatialMotionFromAngles(yaw, pitch), { yaw, pitch });
   }
 
   resetSpatialMotion() {
-    this.applySpatialMotion(spatialMotionFromAngles(0, 0));
+    this.applySpatialMotion(spatialMotionFromAngles(0, 0), { yaw: 0, pitch: 0 });
+  }
+
+  renderDofNav(candidates = this.visibleFocusables(), index = this.focusedIndex) {
+    if (!this.spatialMode || candidates.length === 0 || index < 0) {
+      elements.dofNav.hidden = true;
+      elements.dofNav.innerHTML = '';
+      return;
+    }
+    const labelAt = (offset) => {
+      const targetIndex = (index + offset + candidates.length) % candidates.length;
+      return candidates[targetIndex].textContent.replace(/\s+/g, ' ').trim();
+    };
+    const card = (offset, slot, className, visible) => (
+      visible
+        ? `<button class="${className}" data-dof-offset="${offset}">
+            <span class="dof-slot">${slot}</span>
+            <span class="dof-label">${escapeHtml(labelAt(offset))}</span>
+          </button>`
+        : ''
+    );
+    elements.dofNav.hidden = false;
+    elements.dofNav.innerHTML = `
+      <div class="dof-track">
+        ${card(-1, '上一项', 'dof-card dof-prev', candidates.length > 1)}
+        ${card(0, '当前焦点', 'dof-card dof-current', true)}
+        ${card(1, '下一项', 'dof-card dof-next', candidates.length > 2)}
+      </div>
+      <div class="dof-telemetry">
+        <span>${escapeHtml(this.spatialOrientationLabel || 'YAW +00° · PITCH +00°')}</span>
+        <span>GYRO FOCUS</span>
+      </div>
+    `;
   }
 
   renderHeader() {
@@ -333,6 +368,7 @@ class DemoPreview {
     const owned = Game.getOwnedPlanets(this.game).length;
     const started = this.game.started;
     const primary = started ? '继续远征' : '选择初始殖民地';
+    const upkeepEnabled = Boolean(this.game.settings.colonyUpkeepEnabled);
     const restart = started
       ? `<button class="${this.resetArmed ? 'action-button primary' : 'action-button quiet'}" data-action="menu-restart">${this.resetArmed ? '再次确认新远征' : '开始新远征'}</button>`
       : '';
@@ -343,9 +379,11 @@ class DemoPreview {
           <h1 class="menu-title">英仙座远航</h1>
           <p class="menu-status">${started ? `已控制 ${owned}/10 行星座标 · 舰队 ${Game.getAvailableShips(this.game)}` : '等待建立第一座殖民地'}</p>
           <p class="menu-note">离线最多累计 30 分钟</p>
+          <p class="menu-note">稳定度越低，殖民地日常维持消耗越高</p>
           <div class="menu-rule"></div>
           <div class="menu-actions">
             <button class="action-button primary" data-action="menu-continue">${primary}</button>
+            <button class="action-button quiet" data-action="menu-colony-upkeep">殖民地维持：${upkeepEnabled ? '开启' : '关闭'}</button>
             ${restart}
             <button class="action-button quiet" data-action="menu-exit">退出游戏</button>
           </div>
@@ -372,7 +410,7 @@ class DemoPreview {
           <h1 class="screen-title">建立第一座殖民地</h1>
           <span class="screen-kicker">选择初始据点</span>
         </header>
-        <p class="screen-copy">指向或上下滑选择行星，N 模拟点头建立初始殖民地。</p>
+        <p class="screen-copy">3DoF 转头换焦点、N 模拟点头；平面模式上下选择并 Enter 确认。</p>
         <div class="opening-list">${rows}</div>
       </section>
     `;
@@ -386,14 +424,18 @@ class DemoPreview {
       ? '可结算产出等待自动入库'
       : `${Math.max(1, Math.ceil(claim.nextClaimMs / 1000))} 秒后自动收获`;
     const mailCount = this.game.pendingEvents.length;
+    const colonyUpkeep = Game.getProjectedColonyUpkeep(this.game, Game.CYCLE_MS);
     const fleetStatus = this.game.resources.ships === 0
       ? '无可用舰船'
       : this.game.fleet.damaged > 0
         ? `战损 ${this.game.fleet.damaged}`
         : '舰队完好';
     const warning = this.game.fleet.maintenanceOverdue
-      ? '<p class="objective-line">[!] 维护资源不足，产出将在自动收获时抵扣。</p>'
+      ? '<p class="objective-line">[!] 维持资源不足，建造与维修已锁定。</p>'
       : '';
+    const upkeepText = colonyUpkeep.enabled
+      ? `日常维持 ${formatUpkeep(colonyUpkeep.rounded)} · 稳定低则消耗高`
+      : '日常维持已关闭 · 可在菜单开启';
     return `
       <section class="screen">
         <header class="screen-head">
@@ -406,6 +448,7 @@ class DemoPreview {
             <span class="claim-copy">
               <strong class="claim-title">行星产出自动入库</strong>
               <span class="claim-meta">${owned} 颗己方行星 · <span id="auto-harvest-status">${harvestStatus}</span></span>
+              <span class="claim-meta">${upkeepText}</span>
             </span>
             <span class="claim-auto-status">自动</span>
           </div>
@@ -496,6 +539,7 @@ class DemoPreview {
             <div class="detail-clean-stat"><span class="detail-clean-key">每分钟产出</span><span class="detail-clean-value">${outputLine(planet)}</span></div>
             <div class="detail-clean-stat"><span class="detail-clean-key">稳定度</span><span class="detail-clean-value">${Math.round(state.stability)}</span></div>
             <div class="detail-clean-stat"><span class="detail-clean-key">科研值</span><span class="detail-clean-value">${state.research} / 100</span></div>
+            ${isOwned ? `<div class="detail-clean-stat"><span class="detail-clean-key">每分钟维持</span><span class="detail-clean-value">${this.game.settings.colonyUpkeepEnabled ? formatUpkeep(Game.getColonyUpkeepRate(state.stability).rounded) : '已关闭'} · 稳定修正 x${Game.getColonyUpkeepMultiplier(state.stability).toFixed(2)}</span></div>` : ''}
             <div class="detail-clean-stat"><span class="detail-clean-key">${requirementLabel}</span><span class="detail-clean-value">${requirementValue}</span></div>
           </div>
           <div class="detail-clean-actions">
@@ -529,7 +573,7 @@ class DemoPreview {
           </div>
           <span class="fleet-cost-inline">建造：人 ${build.population} / 能 ${build.energy} / 合 ${build.alloy}</span>
           <span class="fleet-cost-inline">维修：人 ${repair.population} / 能 ${repair.energy} / 合 ${repair.alloy}</span>
-          ${this.game.fleet.maintenanceOverdue ? '<p class="objective-line">[!] 维护资源不足，请先征收产出。</p>' : ''}
+          ${this.game.fleet.maintenanceOverdue ? '<p class="objective-line">[!] 维持资源不足，建造与维修已锁定。</p>' : ''}
           <div class="fleet-tools">
             <button class="action-button quiet" data-action="trade">阵营贸易</button>
             <button class="action-button quiet" data-action="overview">返回总览</button>
@@ -812,7 +856,7 @@ class DemoPreview {
       !element.disabled
       && !element.classList.contains('disabled')
       && !element.hidden
-      && element.getClientRects().length > 0
+      && (this.spatialMode || element.getClientRects().length > 0)
     ));
   }
 
@@ -866,6 +910,8 @@ class DemoPreview {
       this.focusedIndex = -1;
       this.focusContext = context;
       elements.control.hidden = true;
+      elements.dofNav.hidden = true;
+      elements.dofNav.innerHTML = '';
       return;
     }
 
@@ -891,12 +937,15 @@ class DemoPreview {
     elements.control.hidden = false;
     const label = focused.textContent.replace(/\s+/g, ' ').trim();
     elements.control.innerHTML = `
-      <span class="control-prefix">${this.spatialMode ? '3D视线' : '镜腿'}</span>
+      <span class="control-prefix">${this.spatialMode ? '3DoF' : '镜腿'}</span>
       <span class="control-position">${nextIndex + 1}/${candidates.length}</span>
       <span class="control-focus">当前：${escapeHtml(label)}</span>
-      <span class="control-help">${this.spatialMode ? '移动指向 · N 点头确认 · Enter 备用' : '上下选择 · N 点头确认 · Enter 备用'}</span>
+      <span class="control-help">${this.spatialMode ? '陀螺仪转头换焦点 · N 点头确认 · 双击返回' : '上下选择 · Enter 单击确认 · Backspace 返回'}</span>
     `;
-    focused.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+    this.renderDofNav(candidates, nextIndex);
+    if (!this.spatialMode) {
+      focused.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+    }
   }
 
   moveFocus(delta) {
@@ -941,6 +990,16 @@ class DemoPreview {
   }
 
   applyTempleIntent(intent) {
+    if (this.spatialMode) {
+      if (intent.type === 'back') {
+        this.cancelPendingTempleTap();
+        this.goBack();
+      } else if (intent.type === 'tap' && intent.sequence === 'double') {
+        this.cancelPendingTempleTap();
+        this.goBack();
+      }
+      return;
+    }
     if (intent.type === 'previous') {
       this.cancelPendingTempleTap();
       this.moveFocus(-1);
@@ -979,12 +1038,30 @@ class DemoPreview {
   }
 
   handlePreviewNod(event) {
-    if (event.code !== 'KeyN' || event.repeat) return;
+    if (!this.spatialMode || event.code !== 'KeyN' || event.repeat) return;
     event.preventDefault();
     this.activateFocus();
   }
 
+  handleSpatialPreviewKey(event) {
+    if (!this.spatialMode) return;
+    if (event.code === 'ArrowLeft') {
+      event.preventDefault();
+      this.moveFocus(-1);
+    } else if (event.code === 'ArrowRight') {
+      event.preventDefault();
+      this.moveFocus(1);
+    }
+  }
+
   handleClick(event) {
+    const dofCard = event.target.closest('[data-dof-offset]');
+    if (dofCard) {
+      const offset = Number(dofCard.dataset.dofOffset || 0);
+      if (offset === 0) this.activateFocus();
+      else this.moveFocus(offset);
+      return;
+    }
     const button = event.target.closest('[data-action]');
     if (!button) return;
     this.focusedKey = this.focusKeyFor(button);
@@ -996,6 +1073,7 @@ class DemoPreview {
     }
 
     if (action === 'menu-continue') return this.continueFromMenu();
+    if (action === 'menu-colony-upkeep') return this.toggleColonyUpkeep();
     if (action === 'menu-restart') return this.reset();
     if (action === 'menu-exit') return this.requestExit();
     if (action === 'start') return this.start(dataset.planet);
@@ -1040,6 +1118,16 @@ class DemoPreview {
       Game.persistState(this.game, this.storage);
     }
     this.render();
+  }
+
+  toggleColonyUpkeep() {
+    const enabled = !this.game.settings.colonyUpkeepEnabled;
+    this.game = Game.setColonyUpkeepEnabled(this.game, enabled);
+    Game.persistState(this.game, this.storage);
+    this.render();
+    this.showToast(enabled
+      ? '殖民地日常维持已开启。稳定度越低，消耗越高。'
+      : '殖民地日常维持已关闭。');
   }
 
   openOverview() {
@@ -1335,6 +1423,12 @@ class DemoPreview {
   }
 }
 
+function formatSignedAngle(radians) {
+  const degrees = Math.round((Number(radians) || 0) * 180 / Math.PI);
+  const magnitude = Math.abs(degrees);
+  return `${degrees >= 0 ? '+' : '-'}${magnitude < 10 ? '0' : ''}${magnitude}°`;
+}
+
 function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
 }
@@ -1350,6 +1444,10 @@ function formatClock(ms) {
 
 function outputLine(planet) {
   return `${RESOURCE_SHORT_LABELS.population}+${planet.output.population} ${RESOURCE_SHORT_LABELS.energy}+${planet.output.energy} ${RESOURCE_SHORT_LABELS.alloy}+${planet.output.alloy}`;
+}
+
+function formatUpkeep(upkeep) {
+  return `人口 -${upkeep.population} / 能源 -${upkeep.energy} / 合金 -${upkeep.alloy}`;
 }
 
 function ownerLabel(owner) {

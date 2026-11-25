@@ -1,4 +1,7 @@
 # Browser-only preview and development files.
+.git/
+.gitignore
+.gitattributes
 preview/
 tests/
 scripts/

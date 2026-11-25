@@ -22,15 +22,16 @@ import {
   templeIntent,
 } from '../../interaction/temple.js';
 import {
-  findGazeTarget,
-  GAZE_CENTER,
   GAZE_CONFIG,
-  isRapidPitchMotion,
-  projectGazePoint,
   relativeGazeAngles,
   smoothGazeAngles,
   spatialMotionFromAngles,
 } from '../../interaction/gaze.js';
+import {
+  createGyroFocusState,
+  GYRO_CONFIG,
+  gyroFocusIntent,
+} from '../../interaction/gyroscope.js';
 
 const PLANET_BY_ID = PLANETS.reduce((catalog, planet) => {
   catalog[planet.id] = planet;
@@ -65,14 +66,14 @@ function stackedGazePoint(index, total, x = 0.5, first = 0.28, last = 0.72) {
 
 function neutralSpatialMotionPatch() {
   return {
-    spatialBackX: 0,
-    spatialBackY: 0,
-    spatialBackRotate: 0,
     spatialViewX: 0,
     spatialViewY: 0,
     spatialViewRotate: 0,
     spatialViewScale: 1,
+    spatialNavX: 0,
+    spatialNavRotate: 0,
     spatialControlX: 0,
+    spatialOrientationLabel: 'YAW 00° · PITCH 00°',
   };
 }
 
@@ -90,12 +91,22 @@ function formatClock(ms) {
   return `${minutes < 10 ? '0' : ''}${minutes}:${seconds < 10 ? '0' : ''}${seconds}`;
 }
 
+function formatSignedAngle(radians) {
+  const degrees = Math.round((Number(radians) || 0) * 180 / Math.PI);
+  const magnitude = Math.abs(degrees);
+  return `${degrees >= 0 ? '+' : '-'}${magnitude < 10 ? '0' : ''}${magnitude}°`;
+}
+
 function resourceLabel(key) {
   return RESOURCE_LABELS[key] || key;
 }
 
 function outputLine(planet) {
   return `${RESOURCE_SHORT_LABELS.population}+${planet.output.population} ${RESOURCE_SHORT_LABELS.energy}+${planet.output.energy} ${RESOURCE_SHORT_LABELS.alloy}+${planet.output.alloy}`;
+}
+
+function formatUpkeep(upkeep) {
+  return `人口 -${upkeep.population} / 能源 -${upkeep.energy} / 合金 -${upkeep.alloy}`;
 }
 
 function ownerLabel(owner) {
@@ -106,6 +117,10 @@ function ownerLabel(owner) {
 
 function planetModel(planet, state) {
   const planetState = state.planets[planet.id];
+  const isOwned = planetState.owner === 'player';
+  const upkeep = isOwned
+    ? Game.getColonyUpkeepRate(planetState.stability)
+    : null;
   return {
     id: planet.id,
     name: planet.name,
@@ -121,6 +136,14 @@ function planetModel(planet, state) {
     outputAlloy: planet.output.alloy,
     flavor: planet.flavor,
     stability: Math.round(planetState.stability),
+    upkeepLabel: upkeep
+      ? state.settings.colonyUpkeepEnabled
+        ? formatUpkeep(upkeep.rounded)
+        : '已关闭'
+      : '',
+    upkeepMeta: upkeep
+      ? `稳定修正 x${upkeep.multiplier.toFixed(2)}`
+      : '',
     researchValue: planetState.research,
     recommended: planet.recommended,
     recommendedLabel: planet.colonizationShips
@@ -135,7 +158,7 @@ function planetModel(planet, state) {
         ? '殖民状态'
         : '殖民需求'
       : '推荐投入',
-    isOwned: planetState.owner === 'player',
+    isOwned,
     isEnemy: Boolean(planet.hostile) && planetState.owner !== 'player',
     canColonize: planet.originOwner === 'unowned' && planetState.owner !== 'player',
     canReturn: planetState.owner === 'player' && planet.originOwner !== 'unowned',
@@ -192,6 +215,28 @@ function optionModels(event, selectedIndex) {
   }));
 }
 
+function spatialCardModels(targets, currentIndex) {
+  if (!Array.isArray(targets) || targets.length === 0 || currentIndex < 0) {
+    return [];
+  }
+  const cardAt = (offset, slotLabel, className, visible = true) => {
+    const index = ((currentIndex + offset) % targets.length + targets.length)
+      % targets.length;
+    return {
+      offset,
+      slotLabel,
+      label: targets[index].label,
+      className,
+      visible,
+    };
+  };
+  return [
+    cardAt(-1, '上一项', 'dof-card dof-prev', targets.length > 1),
+    cardAt(0, '当前焦点', 'dof-card dof-current'),
+    cardAt(1, '下一项', 'dof-card dof-next', targets.length > 2),
+  ];
+}
+
 function firstNextTarget(state) {
   const targets = PLANETS
     .filter((planet) => state.planets[planet.id].owner !== 'player')
@@ -212,12 +257,15 @@ export default {
     menuShips: 0,
     menuStatus: '等待建立第一座殖民地',
     menuPrimaryLabel: '选择初始殖民地',
+    menuUpkeepLabel: '殖民地维持：开启',
     menuRestartLabel: '开始新远征',
     mapPage: 1,
     tickerText: '深空中继在线',
     resourceItems: [],
     claimReady: false,
     autoHarvestStatus: '',
+    colonyUpkeepEnabled: true,
+    colonyUpkeepLine: '',
     totalOwned: 0,
     nextObjective: '',
     nextObjectiveMeta: '',
@@ -253,16 +301,17 @@ export default {
     focusTargetLabel: '等待操作',
     focusPosition: '0/0',
     controlPrefix: '镜腿',
-    controlHelp: '上下选择 · 点头确认 · 双击返回',
+    controlHelp: '上下选择 · 单击确认 · 双击返回',
     spatialMode: false,
-    spatialBackX: 0,
-    spatialBackY: 0,
-    spatialBackRotate: 0,
+    spatialCards: [],
     spatialViewX: 0,
     spatialViewY: 0,
     spatialViewRotate: 0,
     spatialViewScale: 1,
+    spatialNavX: 0,
+    spatialNavRotate: 0,
     spatialControlX: 0,
+    spatialOrientationLabel: 'YAW 00° · PITCH 00°',
     colonizeTarget: null,
     colonizeAvailable: 0,
     colonizeRequired: 0,
@@ -312,15 +361,20 @@ export default {
     this._gazeSensor = null;
     this._gazeReadingListener = null;
     this._gazeErrorListener = null;
+    this._gyroSensor = null;
+    this._gyroReadingListener = null;
+    this._gyroErrorListener = null;
+    this._gyroFocusState = createGyroFocusState();
+    this._orientationReady = false;
+    this._gyroReady = false;
     this._gazeContextKey = '';
     this._gazeReference = null;
     this._gazeAngles = null;
     this._gazePreviousAngles = null;
     this._gazeLastReadingAt = 0;
-    this._gazeMotionFreezeUntil = 0;
+    this._orientationYawRate = 0;
     this._lastSpatialUpdateAt = 0;
     this._lastSpatialMotion = null;
-    this._gazeAnchor = { ...GAZE_CENTER };
     this._gazeNeedsCalibration = true;
     this._gazeErrorShown = false;
     this._lastNodConfirmAt = 0;
@@ -442,74 +496,116 @@ export default {
       this.setData({
         ...flatSpatialPatch(),
         controlPrefix: '校准',
-        controlHelp: '保持正视建立中心 · 点头确认 · 双击返回',
+        controlHelp: '等待方向与陀螺仪 · 暂用镜腿操作',
       });
       return;
     }
     if (mode === 'active') {
+      this.cancelPendingTempleTap();
+      this._gyroFocusState = createGyroFocusState();
       this.setData({
         spatialMode: true,
-        controlPrefix: '3D视线',
-        controlHelp: '转头环顾 · 点头确认 · 双击返回',
+        controlPrefix: '3DoF',
+        controlHelp: '陀螺仪转头换焦点 · 点头确认 · 双击返回',
       });
       return;
     }
     this.setData({
       ...flatSpatialPatch(),
       controlPrefix: '镜腿',
-      controlHelp: '上下选择 · 点头确认 · 双击返回',
+      controlHelp: '上下选择 · 单击确认 · 双击返回',
     });
   },
 
   startGazeFocus() {
     this.stopGazeFocus();
-    const Sensor = globalThis.AbsoluteOrientationSensor;
-    if (typeof Sensor !== 'function') {
+    const OrientationSensor = globalThis.AbsoluteOrientationSensor;
+    const GyroSensor = globalThis.Gyroscope;
+    if (
+      typeof OrientationSensor !== 'function'
+      || typeof GyroSensor !== 'function'
+    ) {
       this.setGazeMode('fallback');
       return false;
     }
 
+    this._orientationReady = false;
+    this._gyroReady = false;
+    this._gyroFocusState = createGyroFocusState();
     this.setGazeMode('starting');
     try {
-      const sensor = new Sensor({ frequency: GAZE_CONFIG.frequency });
-      this._gazeSensor = sensor;
+      const orientationSensor = new OrientationSensor({
+        frequency: GAZE_CONFIG.frequency,
+      });
+      this._gazeSensor = orientationSensor;
       this._gazeReadingListener = () => this.handleGazeReading();
       this._gazeErrorListener = (event) => this.handleGazeError(event);
-      sensor.addEventListener('reading', this._gazeReadingListener);
-      sensor.addEventListener('error', this._gazeErrorListener);
-      sensor.start();
-      this.recenterGaze(this.resolveFocus().target);
+      orientationSensor.addEventListener('reading', this._gazeReadingListener);
+      orientationSensor.addEventListener('error', this._gazeErrorListener);
+
+      const gyroSensor = new GyroSensor({ frequency: GYRO_CONFIG.frequency });
+      this._gyroSensor = gyroSensor;
+      this._gyroReadingListener = () => this.handleGyroReading();
+      this._gyroErrorListener = (event) => this.handleGyroError(event);
+      gyroSensor.addEventListener('reading', this._gyroReadingListener);
+      gyroSensor.addEventListener('error', this._gyroErrorListener);
+
+      orientationSensor.start();
+      gyroSensor.start();
+      this.recenterGaze();
       return true;
     } catch (error) {
       this.stopGazeFocus();
       this.setGazeMode('fallback');
       if (!this._gazeErrorShown && this.data.screen !== 'boot') {
         this._gazeErrorShown = true;
-        this.showToast('视线传感器不可用，已切换为镜腿选择。');
+        this.showToast('空间传感器不可用，已切换为平面操作。');
       }
       return false;
     }
   },
 
   stopGazeFocus() {
-    const sensor = this._gazeSensor;
-    if (!sensor) return;
-    try {
-      if (this._gazeReadingListener) {
-        sensor.removeEventListener('reading', this._gazeReadingListener);
+    const orientationSensor = this._gazeSensor;
+    const gyroSensor = this._gyroSensor;
+    if (orientationSensor) {
+      try {
+        if (this._gazeReadingListener) {
+          orientationSensor.removeEventListener('reading', this._gazeReadingListener);
+        }
+        if (this._gazeErrorListener) {
+          orientationSensor.removeEventListener('error', this._gazeErrorListener);
+        }
+        orientationSensor.stop();
+      } catch (error) {
+        // The host may already have torn down the sensor during Page teardown.
       }
-      if (this._gazeErrorListener) {
-        sensor.removeEventListener('error', this._gazeErrorListener);
+    }
+    if (gyroSensor) {
+      try {
+        if (this._gyroReadingListener) {
+          gyroSensor.removeEventListener('reading', this._gyroReadingListener);
+        }
+        if (this._gyroErrorListener) {
+          gyroSensor.removeEventListener('error', this._gyroErrorListener);
+        }
+        gyroSensor.stop();
+      } catch (error) {
+        // The host may already have torn down the sensor during Page teardown.
       }
-      sensor.stop();
-    } catch (error) {
-      // The host may already have torn down the sensor during Page teardown.
     }
     this._gazeSensor = null;
     this._gazeReadingListener = null;
     this._gazeErrorListener = null;
+    this._gyroSensor = null;
+    this._gyroReadingListener = null;
+    this._gyroErrorListener = null;
+    this._orientationReady = false;
+    this._gyroReady = false;
+    this._gyroFocusState = createGyroFocusState();
     this._gazeReference = null;
     this._gazeAngles = null;
+    this._orientationYawRate = 0;
   },
 
   handleGazeError() {
@@ -517,22 +613,41 @@ export default {
     this.setGazeMode('fallback');
     if (!this._gazeErrorShown) {
       this._gazeErrorShown = true;
-      this.showToast('视线传感器读取失败，已切换为镜腿选择。');
+      this.showToast('方向传感器读取失败，已切换为平面操作。');
     }
   },
 
-  recenterGaze(target, contextKey = this.focusContextKey()) {
+  handleGyroError() {
+    this.stopGazeFocus();
+    this.setGazeMode('fallback');
+    if (!this._gazeErrorShown) {
+      this._gazeErrorShown = true;
+      this.showToast('陀螺仪读取失败，已切换为平面操作。');
+    }
+  },
+
+  maybeActivateSpatialMode() {
+    if (
+      this._gazeMode === 'starting'
+      && this._orientationReady
+      && this._gyroReady
+    ) {
+      this.resolveFocus();
+      this.setGazeMode('active');
+      this.renderAll();
+    }
+  },
+
+  recenterGaze(contextKey = this.focusContextKey()) {
     this._gazeContextKey = contextKey;
-    this._gazeAnchor = target && target.gaze
-      ? { x: target.gaze.x, y: target.gaze.y }
-      : { ...GAZE_CENTER };
     this._gazeReference = null;
     this._gazeAngles = null;
     this._gazePreviousAngles = null;
     this._gazeLastReadingAt = 0;
-    this._gazeMotionFreezeUntil = 0;
+    this._orientationYawRate = 0;
     this._lastSpatialUpdateAt = 0;
     this._lastSpatialMotion = null;
+    this._gyroFocusState = createGyroFocusState();
     this._gazeNeedsCalibration = true;
     if (this.data.spatialMode) {
       this.setData(neutralSpatialMotionPatch());
@@ -545,7 +660,7 @@ export default {
 
     const contextKey = this.focusContextKey();
     if (this._gazeContextKey !== contextKey) {
-      this.recenterGaze(this.resolveFocus().target, contextKey);
+      this.recenterGaze(contextKey);
     }
 
     const quaternion = Array.from(sensor.quaternion);
@@ -555,50 +670,60 @@ export default {
       this._gazePreviousAngles = { yaw: 0, pitch: 0 };
       this._gazeLastReadingAt = Date.now();
       this._gazeNeedsCalibration = false;
-      this.setGazeMode('active');
+      this._orientationReady = true;
+      this.maybeActivateSpatialMode();
       return;
     }
 
     const rawAngles = relativeGazeAngles(this._gazeReference, quaternion);
     if (!rawAngles) return;
     const now = Date.now();
-    if (isRapidPitchMotion(
-      this._gazePreviousAngles,
-      rawAngles,
-      now - this._gazeLastReadingAt,
-    )) {
-      this._gazeMotionFreezeUntil = now + GAZE_CONFIG.focusFreezeMilliseconds;
-    }
+    const elapsedSeconds = Math.max(
+      0.001,
+      (now - this._gazeLastReadingAt) / 1000,
+    );
+    const previousYaw = this._gazePreviousAngles
+      ? this._gazePreviousAngles.yaw
+      : 0;
+    const rawYawRate = (rawAngles.yaw - previousYaw) / elapsedSeconds;
+    this._orientationYawRate = this._orientationYawRate * 0.4 + rawYawRate * 0.6;
     this._gazePreviousAngles = rawAngles;
     this._gazeLastReadingAt = now;
     this._gazeAngles = smoothGazeAngles(this._gazeAngles, rawAngles);
     this.updateSpatialMotion(this._gazeAngles, now);
-    if (now < this._gazeMotionFreezeUntil) return;
-    const relativePoint = projectGazePoint(
-      this._gazeAngles.yaw,
-      this._gazeAngles.pitch,
-      {
-        horizontalFieldOfViewDegrees: GAZE_CONFIG.horizontalFieldOfViewDegrees,
-        verticalFieldOfViewDegrees: GAZE_CONFIG.verticalFieldOfViewDegrees,
-      },
-    );
-    const anchor = this._gazeAnchor || GAZE_CENTER;
-    const focusPoint = {
-      x: clamp(anchor.x + relativePoint.x - 0.5, 0.01, 0.99),
-      y: clamp(anchor.y + relativePoint.y - 0.5, 0.01, 0.99),
-    };
-    this.setFocusFromGaze(focusPoint);
   },
 
-  setFocusFromGaze(focusPoint) {
-    const focus = this.resolveFocus();
-    const target = findGazeTarget(focus.targets, focusPoint, this._focusTargetId);
-    if (!target || target.id === this._focusTargetId) return;
-    const index = findFocusIndex(focus.targets, target.id);
-    if (index < 0) return;
-    this._focusIndex = index;
-    this._focusTargetId = target.id;
-    this.renderAll();
+  handleGyroReading() {
+    const sensor = this._gyroSensor;
+    if (
+      !sensor
+      || !Number.isFinite(Number(sensor.x))
+      || !Number.isFinite(Number(sensor.y))
+      || !Number.isFinite(Number(sensor.z))
+    ) {
+      return;
+    }
+
+    this._gyroReady = true;
+    this.maybeActivateSpatialMode();
+    if (!this.data.spatialMode) return;
+
+    const now = Date.now();
+    const angularActivity = Math.hypot(
+      Number(sensor.x),
+      Number(sensor.y),
+      Number(sensor.z),
+    );
+    const result = gyroFocusIntent(
+      this._gyroFocusState,
+      angularActivity,
+      this._orientationYawRate,
+      now,
+    );
+    this._gyroFocusState = result.state;
+    if (result.step !== 0) {
+      this.moveFocus(result.step, { recenter: false });
+    }
   },
 
   updateSpatialMotion(angles, now = Date.now()) {
@@ -618,18 +743,29 @@ export default {
     this._lastSpatialUpdateAt = now;
     this._lastSpatialMotion = motion;
     this.setData({
-      spatialBackX: motion.backX,
-      spatialBackY: motion.backY,
-      spatialBackRotate: motion.backRotate,
       spatialViewX: motion.viewX,
       spatialViewY: motion.viewY,
       spatialViewRotate: motion.viewRotate,
       spatialViewScale: motion.viewScale,
+      spatialNavX: motion.navX,
+      spatialNavRotate: motion.navRotate,
       spatialControlX: motion.controlX,
+      spatialOrientationLabel: `YAW ${formatSignedAngle(angles.yaw)} · PITCH ${formatSignedAngle(angles.pitch)}`,
     });
   },
 
+  selectSpatialCard(event) {
+    if (!this.data.spatialMode) return;
+    const offset = Number(eventDataset(event).spatialOffset || 0);
+    if (offset === 0) {
+      this.activateFocusedTarget();
+      return;
+    }
+    this.moveFocus(offset, { recenter: false });
+  },
+
   scheduleSingleTap() {
+    if (this.data.spatialMode) return;
     this.clearSingleTapTimer();
     const token = this._singleTapToken;
     this._singleTapTimer = setTimeout(() => {
@@ -643,11 +779,13 @@ export default {
   applyTempleIntent(intent) {
     if (intent.type === 'previous') {
       this.cancelPendingTempleTap();
+      if (this.data.spatialMode) return;
       this.moveFocus(-1);
       return;
     }
     if (intent.type === 'next') {
       this.cancelPendingTempleTap();
+      if (this.data.spatialMode) return;
       this.moveFocus(1);
       return;
     }
@@ -662,6 +800,7 @@ export default {
       return;
     }
     if (intent.type === 'tap' && intent.sequence === 'single') {
+      if (this.data.spatialMode) return;
       this.scheduleSingleTap();
     }
   },
@@ -687,21 +826,27 @@ export default {
         id: 'menu-continue',
         label: this._game && this._game.started ? '继续远征' : '选择初始殖民地',
         default: true,
-        gaze: gazePoint(0.5, 0.34),
+        gaze: gazePoint(0.5, 0.31),
         run: () => this.continueFromMenu(),
+      });
+      add({
+        id: 'menu-colony-upkeep',
+        label: this.data.menuUpkeepLabel,
+        gaze: gazePoint(0.5, 0.53),
+        run: () => this.toggleColonyUpkeep(),
       });
       if (this.data.menuStarted) {
         add({
           id: 'menu-reset',
           label: this.data.resetArmed ? '再次确认新远征' : '开始新远征',
-          gaze: gazePoint(0.5, 0.6),
+          gaze: gazePoint(0.5, 0.72),
           run: () => this.requestReset(),
         });
       }
       add({
         id: 'menu-exit',
         label: '退出游戏',
-        gaze: gazePoint(0.5, 0.84),
+        gaze: gazePoint(0.5, 0.89),
         run: () => this.requestExit(),
       });
       return targets;
@@ -997,7 +1142,7 @@ export default {
     this._focusIndex = index;
     this._focusTargetId = index >= 0 ? targets[index].id : '';
     if (shouldRecenterGaze) {
-      this.recenterGaze(index >= 0 ? targets[index] : null, contextKey);
+      this.recenterGaze(contextKey);
     }
     return {
       targets,
@@ -1006,7 +1151,7 @@ export default {
     };
   },
 
-  moveFocus(delta) {
+  moveFocus(delta, options = {}) {
     const focus = this.resolveFocus();
     if (focus.targets.length === 0) {
       this.showToast('当前页面没有可执行操作。');
@@ -1015,7 +1160,7 @@ export default {
     const nextIndex = moveFocusIndex(focus.index, focus.targets.length, delta);
     this._focusIndex = nextIndex;
     this._focusTargetId = focus.targets[nextIndex].id;
-    this.recenterGaze(focus.targets[nextIndex]);
+    if (options.recenter !== false) this.recenterGaze();
     this.renderAll();
   },
 
@@ -1097,6 +1242,16 @@ export default {
     this.renderAll();
   },
 
+  toggleColonyUpkeep() {
+    const enabled = !this._game.settings.colonyUpkeepEnabled;
+    this._game = Game.setColonyUpkeepEnabled(this._game, enabled);
+    this.persist();
+    this.renderAll();
+    this.showToast(enabled
+      ? '殖民地日常维持已开启。稳定度越低，消耗越高。'
+      : '殖民地日常维持已关闭。');
+  },
+
   renderAll(now = Date.now()) {
     if (!this._game) return;
     const state = this._game;
@@ -1104,6 +1259,10 @@ export default {
     const autoHarvestStatus = claimWindow.ready
       ? '可结算产出等待自动入库'
       : `${Math.max(1, Math.ceil(claimWindow.nextClaimMs / 1000))} 秒后自动收获`;
+    const colonyUpkeep = Game.getProjectedColonyUpkeep(state, Game.CYCLE_MS);
+    const colonyUpkeepLine = colonyUpkeep.enabled
+      ? `日常维持 ${formatUpkeep(colonyUpkeep.rounded)} · 稳定低则消耗高`
+      : '日常维持已关闭 · 可在菜单开启';
     const highestResearch = Game.getHighestResearch(state);
     const available = Game.getAvailableShips(state);
     const nextTarget = firstNextTarget(state);
@@ -1118,6 +1277,7 @@ export default {
     const screen = this.data.screen;
     const focus = this.resolveFocus(screen);
     const focusedTargetId = focus.target ? focus.target.id : '';
+    const spatialCards = spatialCardModels(focus.targets, focus.index);
     const mapPlanets = PLANETS
       .filter((planet) => planet.page === this.data.mapPage)
       .map((planet) => {
@@ -1240,10 +1400,13 @@ export default {
         ? `已控制 ${ownedCount}/10 行星 · 舰队 ${available}`
         : '等待建立第一座殖民地',
       menuPrimaryLabel: state.started ? '继续远征' : '选择初始殖民地',
+      menuUpkeepLabel: `殖民地维持：${state.settings.colonyUpkeepEnabled ? '开启' : '关闭'}`,
       menuRestartLabel: this.data.resetArmed ? '再次确认新远征' : '开始新远征',
       resourceItems: resources,
       claimReady: claimWindow.ready,
       autoHarvestStatus,
+      colonyUpkeepEnabled: Boolean(state.settings.colonyUpkeepEnabled),
+      colonyUpkeepLine,
       totalOwned: ownedCount,
       nextObjective: nextTarget
         ? nextTarget.colonizationShips
@@ -1264,8 +1427,8 @@ export default {
       buildCostLine: `人口 ${buildCost.population} / 能源 ${buildCost.energy} / 合金 ${buildCost.alloy}`,
       repairCostLine: `人口 ${repairCost.population} / 能源 ${repairCost.energy} / 合金 ${repairCost.alloy}`,
       maintenanceText: state.fleet.maintenanceOverdue
-        ? '[!] 维护资源不足，请先征收产出'
-        : '[+] 维护正常：建造与维修可用',
+        ? '[!] 维持资源不足，建造与维修已锁定'
+        : '[+] 维持正常：建造与维修可用',
       maintenanceWarning: state.fleet.maintenanceOverdue,
       relationLine: `海帕 ${state.relations.starCore >= 0 ? '+' : ''}${state.relations.starCore}  /  陆巡 ${state.relations.heavyWall >= 0 ? '+' : ''}${state.relations.heavyWall}`,
       relationStarCore: state.relations.starCore,
@@ -1275,6 +1438,7 @@ export default {
       focusTargetId: focusedTargetId,
       focusTargetLabel: focus.target ? focus.target.label : '等待操作',
       focusPosition: focus.target ? `${focus.index + 1}/${focus.targets.length}` : '0/0',
+      spatialCards,
       openingPlanets,
       mapPlanets,
       pageTabs: tabs,
@@ -1802,12 +1966,11 @@ export default {
   },
 
   onHeadGesture(event) {
-    if (!event || event.gesture !== 'nod') return;
+    if (!event || event.gesture !== 'nod' || !this.data.spatialMode) return;
     const now = Date.now();
     const lastNodAt = Number(this._lastNodConfirmAt) || 0;
     if (now - lastNodAt < NOD_CONFIRM_COOLDOWN_MS) return;
     this._lastNodConfirmAt = now;
-    this._gazeMotionFreezeUntil = now + GAZE_CONFIG.focusFreezeMilliseconds;
     this.cancelPendingTempleTap();
     const focus = this.resolveFocus();
     if (!focus.target) return;
@@ -1879,20 +2042,8 @@ export default {
 <page>
   <view
     class="app-shell {{spatialMode ? 'spatial-mode' : ''}}"
-    style="--spatial-back-x: {{spatialBackX}}px; --spatial-back-y: {{spatialBackY}}px; --spatial-back-rotate: {{spatialBackRotate}}deg; --spatial-view-x: {{spatialViewX}}px; --spatial-view-y: {{spatialViewY}}px; --spatial-view-rotate: {{spatialViewRotate}}deg; --spatial-view-scale: {{spatialViewScale}}; --spatial-control-x: {{spatialControlX}}px;"
+    style="--spatial-view-x: {{spatialViewX}}px; --spatial-view-y: {{spatialViewY}}px; --spatial-view-rotate: {{spatialViewRotate}}deg; --spatial-view-scale: {{spatialViewScale}}; --spatial-nav-x: {{spatialNavX}}px; --spatial-nav-rotate: {{spatialNavRotate}}deg; --spatial-control-x: {{spatialControlX}}px;"
   >
-    <view ink:if="{{spatialMode}}" class="spatial-depth">
-      <view class="spatial-orbit spatial-orbit-outer"></view>
-      <view class="spatial-orbit spatial-orbit-inner"></view>
-      <view class="spatial-axis spatial-axis-horizontal"></view>
-      <view class="spatial-axis spatial-axis-vertical"></view>
-      <view class="spatial-node spatial-node-a"></view>
-      <view class="spatial-node spatial-node-b"></view>
-      <view class="spatial-node spatial-node-c"></view>
-      <view class="spatial-frame spatial-frame-a"></view>
-      <view class="spatial-frame spatial-frame-b"></view>
-    </view>
-
     <view ink:if="{{showTicker}}" class="telemetry-row">
       <view class="telemetry-window">
         <view class="telemetry-track">
@@ -1933,10 +2084,14 @@ export default {
             <text class="menu-title">英仙座远航</text>
             <text class="menu-status">{{menuStatus}}</text>
             <text class="menu-note">离线最多累计 30 分钟</text>
+            <text class="menu-note">稳定度越低，殖民地日常维持消耗越高</text>
             <view class="menu-rule"></view>
             <view class="menu-actions">
               <button class="action-button primary {{focusTargetId == 'menu-continue' ? 'focused' : ''}}" bindtap="continueFromMenu">
                 <text>{{menuPrimaryLabel}}</text>
+              </button>
+              <button class="action-button quiet {{focusTargetId == 'menu-colony-upkeep' ? 'focused' : ''}}" bindtap="toggleColonyUpkeep">
+                <text>{{menuUpkeepLabel}}</text>
               </button>
               <button ink:if="{{menuStarted}}" class="{{resetArmed ? 'action-button primary' : 'action-button quiet'}} {{focusTargetId == 'menu-reset' ? 'focused' : ''}}" bindtap="requestReset">
                 <text>{{menuRestartLabel}}</text>
@@ -1954,7 +2109,7 @@ export default {
           <text class="screen-title">建立第一座殖民地</text>
           <text class="screen-kicker">选择初始据点</text>
         </view>
-        <text class="screen-copy">看向或上下滑选择行星，点头确认建立初始殖民地。</text>
+        <text class="screen-copy">3DoF 转头换焦点、点头确认；无传感器时上下滑并单击确认。</text>
         <view class="opening-list">
           <button ink:for="{{openingPlanets}}" class="{{item.rowClass}}" data-planet-id="{{item.id}}" bindtap="startColony">
             <text class="planet-index">{{item.ordinal}}</text>
@@ -1979,6 +2134,7 @@ export default {
             <view class="claim-copy">
               <text class="claim-title">行星产出自动入库</text>
               <text class="claim-meta">{{totalOwned}} 颗己方行星 · {{autoHarvestStatus}}</text>
+              <text class="claim-meta">{{colonyUpkeepLine}}</text>
             </view>
             <text class="claim-auto-status">自动</text>
           </view>
@@ -1993,7 +2149,7 @@ export default {
             <text class="screen-meta">可用舰船 {{availableShips}}</text>
             <text class="screen-meta">{{fleetDamageLabel}}</text>
           </view>
-          <text ink:if="{{maintenanceWarning}}" class="objective-line">[!] 维护资源不足，产出将在自动收获时抵扣。</text>
+          <text ink:if="{{maintenanceWarning}}" class="objective-line">[!] 维持资源不足，建造与维修已锁定。</text>
         </view>
       </view>
 
@@ -2038,6 +2194,10 @@ export default {
             <view class="detail-clean-stat">
               <text class="detail-clean-key">科研值</text>
               <text class="detail-clean-value">{{selectedPlanet.researchValue}} / 100</text>
+            </view>
+            <view ink:if="{{selectedPlanet.isOwned}}" class="detail-clean-stat">
+              <text class="detail-clean-key">每分钟维持</text>
+              <text class="detail-clean-value">{{selectedPlanet.upkeepLabel}} · {{selectedPlanet.upkeepMeta}}</text>
             </view>
             <view class="detail-clean-stat">
               <text class="detail-clean-key">{{selectedPlanet.requirementLabel}}</text>
@@ -2103,7 +2263,7 @@ export default {
           </view>
           <text class="fleet-cost-inline">建造：{{buildCostLine}}</text>
           <text class="fleet-cost-inline">维修：{{repairCostLine}}</text>
-          <text ink:if="{{maintenanceWarning}}" class="objective-line">[!] 维护资源不足，产出将在自动收获时抵扣。</text>
+          <text ink:if="{{maintenanceWarning}}" class="objective-line">[!] 维持资源不足，建造与维修已锁定。</text>
           <view class="fleet-tools">
             <button class="action-button quiet {{focusTargetId == 'fleet-trade' ? 'focused' : ''}}" bindtap="goTrade"><text>阵营贸易</text></button>
             <button class="action-button quiet {{focusTargetId == 'fleet-overview' ? 'focused' : ''}}" bindtap="goOverview"><text>返回总览</text></button>
@@ -2300,6 +2460,25 @@ export default {
         </view>
       </view>
     </scroll-view>
+
+    <view ink:if="{{spatialMode && showControlBar && spatialCards.length > 0}}" class="dof-nav">
+      <view class="dof-track">
+        <button
+          ink:for="{{spatialCards}}"
+          ink:if="{{item.visible}}"
+          class="{{item.className}}"
+          data-spatial-offset="{{item.offset}}"
+          bindtap="selectSpatialCard"
+        >
+          <text class="dof-slot">{{item.slotLabel}}</text>
+          <text class="dof-label">{{item.label}}</text>
+        </button>
+      </view>
+      <view class="dof-telemetry">
+        <text>{{spatialOrientationLabel}}</text>
+        <text>GYRO FOCUS</text>
+      </view>
+    </view>
 
     <view ink:if="{{showControlBar}}" class="control-bar">
       <text class="control-prefix">{{controlPrefix}}</text>

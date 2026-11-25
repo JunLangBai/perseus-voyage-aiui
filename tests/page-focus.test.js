@@ -54,6 +54,7 @@ function createPage(screen) {
 test('menu and opening screens expose deterministic focus targets', () => {
   const page = createPage('menu');
   assert.equal(page.resolveFocus().target.id, 'menu-continue');
+  assert.ok(page.getFocusTargets().some((target) => target.id === 'menu-colony-upkeep'));
   assert.ok(page.getFocusTargets().some((target) => target.id === 'menu-exit'));
 
   page.data.screen = 'opening';
@@ -87,6 +88,28 @@ test('exit game saves immediately and closes without a confirmation step', () =>
 
   assert.equal(saves, 1);
   assert.equal(closes, 1);
+});
+
+test('menu setting disables colony upkeep and saves immediately', () => {
+  const page = createPage('menu');
+  let saves = 0;
+  let toast = '';
+  page.persist = () => {
+    saves += 1;
+    return true;
+  };
+  page.showToast = (message) => {
+    toast = message;
+  };
+
+  page.toggleColonyUpkeep();
+  assert.equal(page._game.settings.colonyUpkeepEnabled, false);
+  assert.equal(saves, 1);
+  assert.match(toast, /已关闭/);
+
+  page.toggleColonyUpkeep();
+  assert.equal(page._game.settings.colonyUpkeepEnabled, true);
+  assert.equal(saves, 2);
 });
 
 test('page hide and unload flush the current save', () => {
@@ -199,7 +222,7 @@ test('every focusable screen target has a gaze position', () => {
   });
 });
 
-test('absolute orientation readings move focus and cleanup stops the sensor', () => {
+test('3DoF uses orientation for view, gyro for focus, and stops both sensors', () => {
   class FakeOrientationSensor {
     constructor(options) {
       this.options = options;
@@ -231,19 +254,61 @@ test('absolute orientation readings move focus and cleanup stops the sensor', ()
     }
   }
 
+  class FakeGyroscope {
+    constructor(options) {
+      this.options = options;
+      this.listeners = new Map();
+      this.started = 0;
+      this.stopped = 0;
+      this.x = 0;
+      this.y = 0;
+      this.z = 0;
+    }
+
+    addEventListener(name, listener) {
+      this.listeners.set(name, listener);
+    }
+
+    removeEventListener(name, listener) {
+      if (this.listeners.get(name) === listener) this.listeners.delete(name);
+    }
+
+    start() {
+      this.started += 1;
+    }
+
+    stop() {
+      this.stopped += 1;
+    }
+
+    emitReading({ x = 0, y = 0, z = 0 } = {}) {
+      this.x = x;
+      this.y = y;
+      this.z = z;
+      this.listeners.get('reading')?.();
+    }
+  }
+
   const page = createPage('menu');
-  const previousSensor = globalThis.AbsoluteOrientationSensor;
+  const previousOrientation = globalThis.AbsoluteOrientationSensor;
+  const previousGyroscope = globalThis.Gyroscope;
   globalThis.AbsoluteOrientationSensor = FakeOrientationSensor;
+  globalThis.Gyroscope = FakeGyroscope;
 
   try {
     assert.equal(page.startGazeFocus(), true);
-    const sensor = page._gazeSensor;
-    assert.equal(sensor.options.frequency, 30);
-    assert.equal(sensor.started, 1);
+    const orientation = page._gazeSensor;
+    const gyroscope = page._gyroSensor;
+    assert.equal(orientation.options.frequency, 30);
+    assert.equal(gyroscope.options.frequency, 60);
+    assert.equal(orientation.started, 1);
+    assert.equal(gyroscope.started, 1);
     assert.equal(page.data.controlPrefix, '校准');
 
-    sensor.emitReading([0, 0, 0, 1]);
-    assert.equal(page.data.controlPrefix, '3D视线');
+    orientation.emitReading([0, 0, 0, 1]);
+    assert.equal(page.data.spatialMode, false);
+    gyroscope.emitReading({ y: 0 });
+    assert.equal(page.data.controlPrefix, '3DoF');
     assert.equal(page.data.spatialMode, true);
     assert.equal(page._focusTargetId, 'menu-continue');
 
@@ -254,21 +319,29 @@ test('absolute orientation readings move focus and cleanup stops the sensor', ()
       0,
       Math.cos(pitchDown / 2),
     ];
-    for (let index = 0; index < 20; index += 1) {
-      sensor.emitReading(downQuaternion);
-      page._gazeMotionFreezeUntil = 0;
+    orientation.emitReading(downQuaternion);
+    assert.equal(page._focusTargetId, 'menu-continue');
+
+    page._orientationYawRate = 1;
+    for (let index = 0; index < 3; index += 1) {
+      page._gyroFocusState.lastAt = Date.now() - 40;
+      gyroscope.emitReading({ x: 2 });
     }
-    assert.equal(page._focusTargetId, 'menu-exit');
+    assert.equal(page._focusTargetId, 'menu-colony-upkeep');
 
     page._gazeErrorShown = true;
-    page.handleGazeError();
-    assert.equal(sensor.stopped, 1);
+    page.handleGyroError();
+    assert.equal(orientation.stopped, 1);
+    assert.equal(gyroscope.stopped, 1);
     assert.equal(page._gazeSensor, null);
-    assert.equal(sensor.listeners.size, 0);
+    assert.equal(page._gyroSensor, null);
+    assert.equal(orientation.listeners.size, 0);
+    assert.equal(gyroscope.listeners.size, 0);
     assert.equal(page.data.spatialMode, false);
     assert.equal(page.data.controlPrefix, '镜腿');
   } finally {
-    globalThis.AbsoluteOrientationSensor = previousSensor;
+    globalThis.AbsoluteOrientationSensor = previousOrientation;
+    globalThis.Gyroscope = previousGyroscope;
   }
 });
 
@@ -446,12 +519,41 @@ test('nod confirms the focused target once and other head gestures are ignored',
   };
   page._lastNodConfirmAt = 0;
 
+  page.data.spatialMode = false;
+  page.onHeadGesture({ gesture: 'nod', preventDefault() {} });
+  assert.equal(confirmations, 0);
+
+  page.data.spatialMode = true;
   page.onHeadGesture({ gesture: 'shake', preventDefault() {} });
   assert.equal(confirmations, 0);
 
   page.onHeadGesture({ gesture: 'nod', preventDefault() {} });
   page.onHeadGesture({ gesture: 'nod', preventDefault() {} });
   assert.equal(confirmations, 1);
+});
+
+test('3DoF ignores temple selection and single-click confirmation', () => {
+  const page = createPage('menu');
+  const moves = [];
+  let scheduled = 0;
+  let backs = 0;
+  page.data.spatialMode = true;
+  page.moveFocus = (delta) => moves.push(delta);
+  page.scheduleSingleTap = () => {
+    scheduled += 1;
+  };
+  page.goBack = () => {
+    backs += 1;
+  };
+
+  page.applyTempleIntent({ type: 'previous' });
+  page.applyTempleIntent({ type: 'next' });
+  page.applyTempleIntent({ type: 'tap', sequence: 'single' });
+  assert.deepEqual(moves, []);
+  assert.equal(scheduled, 0);
+
+  page.applyTempleIntent({ type: 'tap', sequence: 'double' });
+  assert.equal(backs, 1);
 });
 
 test('two Page-level temple taps become one double-click back action', () => {

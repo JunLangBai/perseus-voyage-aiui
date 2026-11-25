@@ -9,6 +9,8 @@ import {
   getAvailableShips,
   getBuildCost,
   getClaimWindow,
+  getColonyUpkeepMultiplier,
+  getColonyUpkeepRate,
   getEstimatedWinChance,
   getResearchCostFactor,
   getHighestResearch,
@@ -28,6 +30,7 @@ import {
   persistState,
   reconcileState,
   returnColony,
+  setColonyUpkeepEnabled,
   startExpedition,
   startGame,
 } from '../game/engine.js';
@@ -146,6 +149,27 @@ test('stability now scales planet output from sixty to one hundred forty percent
   assert.equal(getStabilityMultiplier(100), 1.4);
 });
 
+test('colony upkeep is enabled by default and scales inversely with stability', () => {
+  const state = startTide();
+  assert.equal(state.settings.colonyUpkeepEnabled, true);
+  assert.equal(getColonyUpkeepMultiplier(0), 1.4);
+  assert.equal(getColonyUpkeepMultiplier(50), 1);
+  assert.ok(Math.abs(getColonyUpkeepMultiplier(100) - 0.6) < 0.000001);
+
+  const unstable = getColonyUpkeepRate(20);
+  const stable = getColonyUpkeepRate(80);
+  assert.ok(unstable.raw.population > stable.raw.population);
+  assert.ok(unstable.raw.energy > stable.raw.energy);
+  assert.ok(unstable.raw.alloy > stable.raw.alloy);
+
+  const disabled = setColonyUpkeepEnabled(state, false);
+  assert.equal(disabled.settings.colonyUpkeepEnabled, false);
+  assert.equal(
+    normalizeState(disabled, START).settings.colonyUpkeepEnabled,
+    false,
+  );
+});
+
 test('research value and goodwill now materially reduce build and trade costs', () => {
   const state = startTide();
   state.planets['tide-3'].research = 100;
@@ -202,16 +226,24 @@ test('auto claims become ready every ten seconds and accrue one-sixth minute of 
     });
   }
   assert.deepEqual(totalAdded, { population: 39, energy: 45, alloy: 20 });
-  assert.deepEqual(totalMaintenance, { population: 0, energy: 1, alloy: 1 });
+  assert.deepEqual(totalMaintenance, { population: 2, energy: 4, alloy: 3 });
 });
 
-test('offline accumulation is capped to thirty minutes and maintenance is deducted', () => {
+test('offline accumulation is capped and colony upkeep is deducted during normal settlement', () => {
   const state = startTide();
   const result = claimAll(state, START + 3 * 60 * 60 * 1000);
   assert.equal(result.ok, true);
   assert.equal(result.cycles, MAX_OFFLINE_MS / (60 * 1000));
   assert.deepEqual(result.added, { population: 1176, energy: 1344, alloy: 605 });
-  assert.deepEqual(result.maintenance, { population: 9, energy: 18, alloy: 15 });
+  assert.deepEqual(result.colonyMaintenance, { population: 53, energy: 79, alloy: 53 });
+  assert.deepEqual(result.fleetMaintenance, { population: 9, energy: 18, alloy: 15 });
+  assert.deepEqual(result.maintenance, { population: 62, energy: 97, alloy: 68 });
+
+  const withoutColonyUpkeep = setColonyUpkeepEnabled(state, false);
+  const disabledResult = claimAll(withoutColonyUpkeep, START + 3 * 60 * 60 * 1000);
+  assert.equal(disabledResult.colonyUpkeepEnabled, false);
+  assert.deepEqual(disabledResult.colonyMaintenance, { population: 0, energy: 0, alloy: 0 });
+  assert.deepEqual(disabledResult.maintenance, { population: 9, energy: 18, alloy: 15 });
 });
 
 test('five builds reach the first hostile target recommendation', () => {

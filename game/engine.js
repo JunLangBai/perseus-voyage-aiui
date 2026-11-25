@@ -25,6 +25,11 @@ export const STABILITY_MULTIPLIER_PER_POINT = 0.008;
 export const RESEARCH_COST_PER_POINT = 0.0032;
 export const RESEARCH_COST_FLOOR = 0.68;
 export const TRADE_RELATION_DIVISOR = 250;
+export const COLONY_UPKEEP_PER_MINUTE = {
+  population: 2,
+  energy: 3,
+  alloy: 2,
+};
 export const INITIAL_RESOURCES = {
   population: 137,
   energy: 190,
@@ -70,6 +75,15 @@ function normalizeRelation(value) {
   );
 }
 
+function normalizeSettings(raw) {
+  const source = raw && typeof raw === 'object' ? raw : {};
+  return {
+    colonyUpkeepEnabled: source.colonyUpkeepEnabled === undefined
+      ? true
+      : Boolean(source.colonyUpkeepEnabled),
+  };
+}
+
 function legacyResearchValue(level, progress, fallback) {
   if (level === undefined || level === null) return fallback;
   const safeLevel = clamp(Math.round(toSafeNumber(level, 1)), 1, 5);
@@ -85,6 +99,10 @@ function normalizeClaimCarry(raw) {
   const maintenance = source.maintenance && typeof source.maintenance === 'object'
     ? source.maintenance
     : {};
+  const colonyMaintenance = source.colonyMaintenance
+    && typeof source.colonyMaintenance === 'object'
+    ? source.colonyMaintenance
+    : {};
   const normalizePart = (part) => {
     const output = emptyResourceCarry();
     RESOURCE_KEYS.forEach((key) => {
@@ -95,6 +113,7 @@ function normalizeClaimCarry(raw) {
   return {
     production: normalizePart(production),
     maintenance: normalizePart(maintenance),
+    colonyMaintenance: normalizePart(colonyMaintenance),
   };
 }
 
@@ -137,6 +156,9 @@ export function createDefaultState(now = Date.now()) {
     started: false,
     startedAt: null,
     selectedStartId: null,
+    settings: {
+      colonyUpkeepEnabled: true,
+    },
     resources: clone(INITIAL_RESOURCES),
     planets,
     fleet: {
@@ -151,6 +173,7 @@ export function createDefaultState(now = Date.now()) {
     claimCarry: {
       production: emptyResourceCarry(),
       maintenance: emptyResourceCarry(),
+      colonyMaintenance: emptyResourceCarry(),
     },
     lastClaimAt: current,
     nextEventAt: current + 45 * 1000,
@@ -197,6 +220,7 @@ export function normalizeState(raw, now = Date.now()) {
     resources: { ...base.resources, ...(raw.resources || {}) },
     relations: { ...base.relations, ...(raw.relations || {}) },
     fleet: { ...base.fleet, ...(raw.fleet || {}) },
+    settings: normalizeSettings(raw.settings),
     claimCarry: normalizeClaimCarry(raw.claimCarry),
     planets: {},
     pendingEvents: Array.isArray(raw.pendingEvents) ? raw.pendingEvents.slice(0, 3) : [],
@@ -415,7 +439,7 @@ export function buildShips(inputState) {
   const state = clone(inputState);
   const cost = getBuildCost(state);
   if (state.fleet.maintenanceOverdue) {
-    return { ok: false, state: inputState, message: '维护资源不足，建造已锁定。先领取产出。' };
+    return { ok: false, state: inputState, message: '维持资源不足，建造已锁定。等待下一轮自动结算。' };
   }
   if (!canAfford(state.resources, cost)) {
     return { ok: false, state: inputState, message: '人口、能源或合金不足，无法建造。' };
@@ -439,7 +463,7 @@ export function repairShips(inputState) {
 
   const cost = getRepairCost(state);
   if (state.fleet.maintenanceOverdue) {
-    return { ok: false, state: inputState, message: '维护资源不足，维修已锁定。先领取产出。' };
+    return { ok: false, state: inputState, message: '维持资源不足，维修已锁定。等待下一轮自动结算。' };
   }
   if (!canAfford(state.resources, cost)) {
     return { ok: false, state: inputState, message: '人口、能源或合金不足，无法维修。' };
@@ -507,6 +531,44 @@ export function getStabilityMultiplier(stability) {
   );
 }
 
+export function getColonyUpkeepMultiplier(stability) {
+  return clamp(
+    2 - getStabilityMultiplier(clamp(toSafeNumber(stability, 50), 0, 100)),
+    STABILITY_MULTIPLIER_MIN,
+    STABILITY_MULTIPLIER_MAX,
+  );
+}
+
+export function getColonyUpkeepRate(stability, elapsedMs = CYCLE_MS) {
+  const cycles = clamp(elapsedMs / CYCLE_MS, 0, MAX_OFFLINE_MS / CYCLE_MS);
+  const multiplier = getColonyUpkeepMultiplier(stability);
+  const raw = {};
+  const rounded = {};
+  RESOURCE_KEYS.forEach((key) => {
+    raw[key] = COLONY_UPKEEP_PER_MINUTE[key] * multiplier * cycles;
+    rounded[key] = roundResourceAmount(raw[key]);
+  });
+  return {
+    cycles,
+    multiplier,
+    raw,
+    rounded,
+  };
+}
+
+export function setColonyUpkeepEnabled(inputState, enabled) {
+  const state = clone(inputState);
+  state.settings = {
+    ...normalizeSettings(state.settings),
+    colonyUpkeepEnabled: Boolean(enabled),
+  };
+  state.claimCarry = normalizeClaimCarry(state.claimCarry);
+  if (!state.settings.colonyUpkeepEnabled) {
+    state.claimCarry.colonyMaintenance = emptyResourceCarry();
+  }
+  return state;
+}
+
 export function getClaimWindow(state, now = Date.now()) {
   const current = nowValue(now);
   const elapsed = Math.max(0, current - state.lastClaimAt);
@@ -517,6 +579,35 @@ export function getClaimWindow(state, now = Date.now()) {
     nextClaimMs: Math.max(0, AUTO_CLAIM_INTERVAL_MS - elapsed),
     progress: Math.min(elapsedMs / CYCLE_MS, 1),
     ready: state.started && elapsed >= AUTO_CLAIM_INTERVAL_MS,
+  };
+}
+
+export function getProjectedColonyUpkeep(state, elapsedMs = CYCLE_MS) {
+  const cycles = clamp(elapsedMs / CYCLE_MS, 0, MAX_OFFLINE_MS / CYCLE_MS);
+  const raw = { population: 0, energy: 0, alloy: 0 };
+  const owned = state ? getOwnedPlanets(state) : [];
+  const enabled = Boolean(state?.started && state.settings?.colonyUpkeepEnabled);
+
+  if (enabled) {
+    owned.forEach((planet) => {
+      const rate = getColonyUpkeepRate(state.planets[planet.id].stability, elapsedMs);
+      RESOURCE_KEYS.forEach((key) => {
+        raw[key] += rate.raw[key];
+      });
+    });
+  }
+
+  const rounded = {};
+  RESOURCE_KEYS.forEach((key) => {
+    rounded[key] = roundResourceAmount(raw[key]);
+  });
+
+  return {
+    enabled,
+    planetCount: owned.length,
+    cycles,
+    raw,
+    rounded,
   };
 }
 
@@ -537,19 +628,39 @@ export function getProjectedProduction(state, elapsedMs = CYCLE_MS) {
     production[key] = roundResourceAmount(rawProduction[key]);
   });
 
-  const rawMaintenance = {
+  const rawFleetMaintenance = {
     population: (state.resources.ships / 100) * 3 * cycles,
     energy: (state.resources.ships / 100) * 6 * cycles,
     alloy: (state.resources.ships / 100) * 5 * cycles,
   };
+  const colonyUpkeep = getProjectedColonyUpkeep(state, elapsedMs);
+  const rawMaintenance = {};
+  const fleetMaintenance = {};
+  const colonyMaintenance = {};
+  RESOURCE_KEYS.forEach((key) => {
+    rawMaintenance[key] = rawFleetMaintenance[key] + colonyUpkeep.raw[key];
+    fleetMaintenance[key] = roundResourceAmount(rawFleetMaintenance[key]);
+    colonyMaintenance[key] = colonyUpkeep.rounded[key];
+  });
 
   const maintenance = {
-    population: roundResourceAmount(rawMaintenance.population),
-    energy: roundResourceAmount(rawMaintenance.energy),
-    alloy: roundResourceAmount(rawMaintenance.alloy),
+    population: fleetMaintenance.population + colonyMaintenance.population,
+    energy: fleetMaintenance.energy + colonyMaintenance.energy,
+    alloy: fleetMaintenance.alloy + colonyMaintenance.alloy,
   };
 
-  return { production, rawProduction, maintenance, rawMaintenance, cycles };
+  return {
+    production,
+    rawProduction,
+    maintenance,
+    rawMaintenance,
+    fleetMaintenance,
+    rawFleetMaintenance,
+    colonyMaintenance,
+    rawColonyMaintenance: colonyUpkeep.raw,
+    colonyUpkeepEnabled: colonyUpkeep.enabled,
+    cycles,
+  };
 }
 
 export function claimAll(inputState, now = Date.now()) {
@@ -575,12 +686,26 @@ export function claimAll(inputState, now = Date.now()) {
 
   let maintenanceShortage = false;
   const maintenance = {};
+  const fleetMaintenance = {};
+  const colonyMaintenance = {};
+  const nextFleetMaintenanceCarry = emptyResourceCarry();
+  const nextColonyMaintenanceCarry = emptyResourceCarry();
   const nextMaintenanceCarry = emptyResourceCarry();
   RESOURCE_KEYS.forEach((key) => {
-    const total = projected.rawMaintenance[key] + state.claimCarry.maintenance[key];
-    const due = roundResourceAmount(total);
+    const fleetTotal = projected.rawFleetMaintenance[key]
+      + state.claimCarry.maintenance[key];
+    const colonyTotal = projected.colonyUpkeepEnabled
+      ? projected.rawColonyMaintenance[key] + state.claimCarry.colonyMaintenance[key]
+      : 0;
+    const fleetDue = roundResourceAmount(fleetTotal);
+    const colonyDue = roundResourceAmount(colonyTotal);
+    const due = fleetDue + colonyDue;
+    fleetMaintenance[key] = fleetDue;
+    colonyMaintenance[key] = colonyDue;
     maintenance[key] = due;
-    nextMaintenanceCarry[key] = total - due;
+    nextFleetMaintenanceCarry[key] = fleetTotal - fleetDue;
+    nextColonyMaintenanceCarry[key] = colonyTotal - colonyDue;
+    nextMaintenanceCarry[key] = nextFleetMaintenanceCarry[key];
     if (state.resources[key] < due) maintenanceShortage = true;
     state.resources[key] = Math.max(0, state.resources[key] - due);
   });
@@ -588,6 +713,7 @@ export function claimAll(inputState, now = Date.now()) {
   state.claimCarry = {
     production: nextProductionCarry,
     maintenance: nextMaintenanceCarry,
+    colonyMaintenance: nextColonyMaintenanceCarry,
   };
   state.lastClaimAt = current;
 
@@ -596,9 +722,12 @@ export function claimAll(inputState, now = Date.now()) {
     state,
     added,
     maintenance,
+    fleetMaintenance,
+    colonyMaintenance,
+    colonyUpkeepEnabled: projected.colonyUpkeepEnabled,
     cycles: projected.cycles,
     maintenanceShortage,
-    message: maintenanceShortage ? '产出已领取，但维护资源不足。' : '本轮行星产出已领取。',
+    message: maintenanceShortage ? '产出已领取，但维持资源不足。' : '本轮行星产出与维持已结算。',
   };
 }
 

@@ -17,6 +17,7 @@ const requiredFiles = [
   'pages/index/index.ink',
   'styles/app.css',
   'interaction/gaze.js',
+  'interaction/gyroscope.js',
   'interaction/temple.js',
 ];
 const allowedTags = new Set([

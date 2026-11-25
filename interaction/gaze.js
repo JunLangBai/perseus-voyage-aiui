@@ -6,7 +6,7 @@ export const GAZE_CONFIG = Object.freeze({
   hysteresis: 0.045,
   rapidPitchDegreesPerSecond: 35,
   focusFreezeMilliseconds: 220,
-  spatialUpdateMilliseconds: 70,
+  spatialUpdateMilliseconds: 50,
 });
 
 export const GAZE_CENTER = Object.freeze({ x: 0.5, y: 0.5 });
@@ -134,14 +134,16 @@ export function spatialMotionFromAngles(yaw, pitch, options = {}) {
   );
 
   return {
-    backX: roundMotion(-normalizedX * 6.5),
-    backY: roundMotion(-normalizedY * 4.5),
-    backRotate: roundMotion(-normalizedX * 1.1),
-    viewX: roundMotion(normalizedX * 2.4),
-    viewY: roundMotion(normalizedY * 1.7),
-    viewRotate: roundMotion(-normalizedX * 0.55),
-    viewScale: roundMotion(1 + Math.abs(normalizedY) * 0.004, 3),
-    controlX: roundMotion(-normalizedX * 1.1),
+    viewX: roundMotion(normalizedX * 16),
+    viewY: roundMotion(normalizedY * 9),
+    viewRotate: roundMotion(-normalizedX * 2.2),
+    viewScale: roundMotion(
+      1 - Math.abs(normalizedY) * 0.018 + Math.abs(normalizedX) * 0.006,
+      3,
+    ),
+    navX: roundMotion(normalizedX * 9),
+    navRotate: roundMotion(-normalizedX * 1.4),
+    controlX: roundMotion(-normalizedX * 2.2),
   };
 }
 

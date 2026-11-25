@@ -98,20 +98,19 @@ test('rapid pitch motion is recognized as a nod guard without blocking settled g
   ), false);
 });
 
-test('orientation drives restrained opposite-depth parallax motion', () => {
+test('orientation drives the 3DoF viewport and focus rail motion', () => {
   const center = spatialMotionFromAngles(0, 0);
-  assert.equal(center.backX, 0);
   assert.equal(center.viewX, 0);
+  assert.equal(center.navX, 0);
   assert.equal(center.viewScale, 1);
 
   const right = spatialMotionFromAngles(radians(10), 0);
-  assert.ok(right.backX < 0);
   assert.ok(right.viewX > 0);
-  assert.ok(right.controlX < 0);
-  assert.ok(Math.abs(right.viewX) <= 2.4);
+  assert.ok(right.viewRotate < 0);
+  assert.ok(right.navX > 0);
+  assert.ok(Math.abs(right.viewX) <= 16);
 
   const down = spatialMotionFromAngles(0, -radians(7));
-  assert.ok(down.backY < 0);
   assert.ok(down.viewY > 0);
-  assert.ok(down.viewScale > 1);
+  assert.ok(down.viewScale < 1);
 });

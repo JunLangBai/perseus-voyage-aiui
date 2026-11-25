@@ -4,8 +4,8 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>英仙座远航 Demo Preview</title>
-    <link rel="stylesheet" href="../styles/app.css?v=20261121-13" />
-    <link rel="stylesheet" href="./preview.css?v=20261121-13" />
+    <link rel="stylesheet" href="../styles/app.css?v=20261122-16" />
+    <link rel="stylesheet" href="./preview.css?v=20261122-16" />
   </head>
   <body class="preview-body">
     <main class="preview-wrap">
@@ -14,28 +14,18 @@
         <span>P0 CORE LOOP PROTOTYPE</span>
       </div>
       <section id="app" class="app-shell" aria-label="英仙座远航游戏预览">
-        <div id="spatial-depth" class="spatial-depth" hidden aria-hidden="true">
-          <div class="spatial-orbit spatial-orbit-outer"></div>
-          <div class="spatial-orbit spatial-orbit-inner"></div>
-          <div class="spatial-axis spatial-axis-horizontal"></div>
-          <div class="spatial-axis spatial-axis-vertical"></div>
-          <div class="spatial-node spatial-node-a"></div>
-          <div class="spatial-node spatial-node-b"></div>
-          <div class="spatial-node spatial-node-c"></div>
-          <div class="spatial-frame spatial-frame-a"></div>
-          <div class="spatial-frame spatial-frame-b"></div>
-        </div>
         <header id="telemetry" class="telemetry-row"></header>
         <section id="resources" class="resource-strip"></section>
         <section id="viewport" class="viewport"></section>
+        <section id="dof-nav" class="dof-nav" hidden></section>
         <section id="control" class="control-bar"></section>
         <div id="toast" class="toast" hidden></div>
       </section>
       <p class="preview-help">
-        视线调试：鼠标移动产生视差并指向按钮，N 模拟点头；↑/↓ 换按钮，Enter 备用，Backspace 返回；网址加 ?flat=1 查看无传感器平面模式。
+        3DoF 调试：鼠标移动环视，←/→ 模拟陀螺仪换焦点，N 模拟点头；?flat=1 查看平面镜腿模式。
       </p>
     </main>
-    <script type="module" src="./app.js?v=20261121-13"></script>
+    <script type="module" src="./app.js?v=20261122-16"></script>
   </body>
 </html>
 

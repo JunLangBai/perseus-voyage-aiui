@@ -6,7 +6,7 @@
   "scripts": {
     "check": "node scripts/validate-aiui.mjs",
     "preview": "node scripts/serve-preview.mjs",
-    "test": "node --test tests/engine.test.js tests/temple.test.js tests/gaze.test.js tests/page-focus.test.js"
+    "test": "node --test tests/engine.test.js tests/temple.test.js tests/gaze.test.js tests/gyroscope.test.js tests/page-focus.test.js"
   }
 }
 
